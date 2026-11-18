@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Konoha RPG – Étape 1</title>
+<script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+<style>
+  :root{--ink:#14181f;--paper:#f3e9d2;--leaf:#f0861f;--mute:#b9ae94}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:#000;font-family:"Hiragino Mincho ProN","Yu Mincho","Noto Serif JP",Georgia,serif}
+  #menu{position:fixed;inset:0;z-index:10;display:flex;align-items:center;
+    background:linear-gradient(90deg,rgba(20,24,31,.94) 0%,rgba(20,24,31,.78) 45%,rgba(20,24,31,.15) 100%);color:var(--paper)}
+  #menu.hidden{display:none}
+  .panel{width:min(520px,100%);padding:clamp(24px,6vw,72px)}
+  h1{font-size:clamp(44px,8vw,84px);font-weight:700;margin:0 0 8px;letter-spacing:.02em;line-height:1}
+  .lead{margin:0 0 36px;color:var(--mute);font-size:17px;line-height:1.5;max-width:34ch}
+  button.mode{display:block;width:100%;text-align:left;margin:0 0 14px;padding:18px 22px;border:2px solid var(--paper);
+    background:transparent;color:var(--paper);font:inherit;cursor:pointer;border-radius:2px}
+  button.mode b{display:block;font-size:24px;margin-bottom:4px}
+  button.mode span{font-size:15px;color:var(--mute)}
+  button.mode:hover:not(:disabled),button.mode:focus-visible{background:var(--leaf);border-color:var(--leaf);color:var(--ink);outline:none}
+  button.mode:hover:not(:disabled) span,button.mode:focus-visible span{color:var(--ink)}
+  button.mode:disabled{opacity:.4;cursor:wait}
+  #msg{min-height:1.5em;margin-top:18px;font-size:15px;color:#ffb27a}
+  .kanji{position:absolute;right:6vw;top:50%;transform:translateY(-50%);writing-mode:vertical-rl;
+    font-size:clamp(60px,14vw,170px);font-weight:700;color:transparent;-webkit-text-stroke:2px rgba(243,233,210,.55);letter-spacing:.1em;pointer-events:none}
+  @media (max-width:700px){.kanji{display:none}}
+  #hud{position:fixed;left:14px;bottom:12px;z-index:5;color:#fff;font:14px/1.4 system-ui,sans-serif;
+    text-shadow:0 1px 3px #000;display:none;pointer-events:none}
+</style>
+</head>
+<body>
+
+<div id="menu">
+  <div class="panel">
+    <h1>Konoha</h1>
+    <p class="lead">Le village caché de la Feuille t’attend. Choisis comment y entrer.</p>
+    <button class="mode" id="btnPC" disabled><b>Mode PC</b><span>Clavier et souris</span></button>
+    <button class="mode" id="btnVR" disabled><b>Mode VR</b><span>Casque WebXR avec manettes Touch</span></button>
+    <div id="msg">Chargement du village…</div>
+  </div>
+  <div class="kanji" aria-hidden="true">木ノ葉</div>
+</div>
+<div id="hud">ZQSD / WASD / flèches : marcher · Souris : regarder · Clic : verrouiller la souris · Échap : libérer</div>
+
+<a-scene id="scene" vr-mode-ui="enabled:false" loading-screen="enabled:false" device-orientation-permission-ui="enabled:false"
+         background="color:#9fd0ec" fog="type:linear;color:#cfe3ee;near:60;far:260" renderer="antialias:true">
+
+  <a-entity light="type:ambient;color:#ffffff;intensity:.5"></a-entity>
+  <a-entity light="type:hemisphere;color:#dff0ff;groundColor:#6a8a4a;intensity:.6"></a-entity>
+  <a-entity light="type:directional;color:#fff1d6;intensity:1.1" position="-40 70 50"></a-entity>
+
+  <a-entity konoha></a-entity>
+  <a-entity id="body" ninja-body></a-entity>
+
+  <a-entity id="rig" position="0 0 64" wasd-controls="acceleration:90;enabled:false">
+    <a-entity id="cam" camera="near:.05;far:600" position="0 1.65 0" look-controls="pointerLockEnabled:true;enabled:false"></a-entity>
+  </a-entity>
+
+  <a-entity id="lhand" oculus-touch-controls="hand:left;model:false" ninja-hand="side:left" stick-move></a-entity>
+  <a-entity id="rhand" oculus-touch-controls="hand:right;model:false" ninja-hand="side:right"></a-entity>
+</a-scene>
+
+<script>
+(() => {
+const THREE = AFRAME.THREE;
+const M = (c, o) => new THREE.MeshStandardMaterial(Object.assign({color: c, roughness: .9, metalness: 0}, o || {}));
+const box = (w, h, d) => new THREE.BoxGeometry(w, h, d);
+let seed = 11;
+const rnd = () => { seed = seed * 16807 % 2147483647; return (seed - 1) / 2147483646; };
+const add = (p, g, m, x, y, z) => { const o = new THREE.Mesh(g, m); o.position.set(x, y, z); p.add(o); return o; };
+
+function signMat(text, bg, fg, ratio) {
+  const c = document.createElement('canvas');
+  c.width = 512; c.height = Math.round(512 / ratio);
+  const x = c.getContext('2d');
+  if (bg) { x.fillStyle = bg; x.fillRect(0, 0, c.width, c.height); }
+  x.fillStyle = fg; x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.font = 'bold ' + Math.round(c.height * .72) + 'px "Noto Sans JP","Yu Gothic","Hiragino Sans","Meiryo",sans-serif';
+  x.fillText(text, c.width / 2, c.height / 2 + c.height * .04);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+  return new THREE.MeshBasicMaterial({map: t, transparent: !bg});
+}
+
+/* ============================ VILLAGE ============================ */
+const wallC = [0xe9dcc0, 0xd9c7a0, 0xf0e6d0].map(c => M(c));
+const roofC = [0x8a3a2b, 0x3f5a4a, 0x59534d].map(c => M(c, {flatShading: true}));
+const wood = M(0x4a3222), stone = M(0x8c877c), doorM = M(0x3a2618);
+const glass = M(0xf6d98c, {emissive: 0xf2b04a, emissiveIntensity: .35});
+const pyr = new THREE.ConeGeometry(1, 1, 4, 1); pyr.rotateY(Math.PI / 4);
+
+function house(g, x, z, ry) {
+  const w = 6 + rnd() * 2, d = 6 + rnd() * 1.5, h = 3.2 + rnd();
+  const o = new THREE.Group(); o.position.set(x, 0, z); o.rotation.y = ry; g.add(o);
+  const wm = wallC[Math.floor(rnd() * 3)], rm = roofC[Math.floor(rnd() * 3)];
+  add(o, box(w + .2, .5, d + .2), stone, 0, .25, 0);
+  add(o, box(w, h, d), wm, 0, h / 2, 0);
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) add(o, box(.22, h, .22), wood, sx * w / 2, h / 2, sz * d / 2);
+  add(o, box(w + .1, .2, d + .1), wood, 0, h - .1, 0);
+  add(o, box(w + 1.4, .2, d + 1.4), wood, 0, h + .1, 0);
+  const r = add(o, pyr, rm, 0, h + 1.4, 0);
+  r.scale.set((w / 2 + .7) * 1.4142, 2.4, (d / 2 + .7) * 1.4142);
+  add(o, box(1.2, 2.2, .12), doorM, 0, 1.1, d / 2 + .05);
+  for (const sx of [-1, 1]) add(o, box(1, .9, .08), glass, sx * w * .3, h * .62, d / 2 + .04);
+}
+
+function tree(g, x, z) {
+  const s = .8 + rnd() * .7, t = new THREE.Group();
+  t.position.set(x, 0, z); t.scale.setScalar(s); g.add(t);
+  add(t, new THREE.CylinderGeometry(.35, .5, 3.2, 6), wood, 0, 1.6, 0);
+  const leaf = M([0x3f7a34, 0x4d8c3a, 0x356b30][Math.floor(rnd() * 3)], {flatShading: true});
+  add(t, new THREE.IcosahedronGeometry(2.3, 1), leaf, 0, 4.4, 0);
+  add(t, new THREE.IcosahedronGeometry(1.7, 1), leaf, .6, 6, .3);
+}
+
+function build(g) {
+  const flatM = (c) => M(c, {polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2});
+  const flat = (geo, mat, x, y, z) => { const o = add(g, geo, mat, x, y, z); o.rotation.x = -Math.PI / 2; return o; };
+  flat(new THREE.PlaneGeometry(600, 600), M(0x6a9a42), 0, 0, 0);
+  const dirt = flatM(0xc9b48a);
+  flat(new THREE.PlaneGeometry(8, 105), dirt, 0, .02, 22.5);
+  flat(new THREE.PlaneGeometry(80, 6), dirt, 0, .02, 8);
+  flat(new THREE.CircleGeometry(16, 48), flatM(0xd9c9a0), 0, .04, -30);
+  flat(new THREE.RingGeometry(14.2, 16, 48), flatM(0xa8946a), 0, .05, -30);
+
+  // Maisons
+  for (const z of [56, 46, 36, 24, -2, -10]) for (const side of [-1, 1]) {
+    const d = 6.7; house(g, side * (4.4 + d / 2), z, side > 0 ? -Math.PI / 2 : Math.PI / 2);
+  }
+  for (const x of [17, 26, 35]) for (const side of [-1, 1]) {
+    house(g, side * x, 8 - 3.4 - 3.5, 0);
+    house(g, side * x, 8 + 3.4 + 3.5, Math.PI);
+  }
+
+  // Tour du Hokage
+  const red = M(0xb5402f), roofG = M(0x2f5d50, {flatShading: true}), cyl = (a, b, h) => new THREE.CylinderGeometry(a, b, h, 28);
+  const tw = new THREE.Group(); tw.position.set(0, 0, -42); g.add(tw);
+  add(tw, cyl(7.5, 8, 10), red, 0, 5, 0);
+  add(tw, new THREE.ConeGeometry(10, 3.5, 28), roofG, 0, 11.75, 0);
+  add(tw, cyl(5.5, 5.5, 6), red, 0, 14, 0);
+  add(tw, new THREE.ConeGeometry(8, 4, 28), roofG, 0, 19, 0);
+  add(tw, cyl(2, 2, 3), red, 0, 22.5, 0);
+  add(tw, new THREE.ConeGeometry(3.5, 2.5, 28), roofG, 0, 25.25, 0);
+  add(tw, box(2.4, 3.6, .4), doorM, 0, 1.8, 7.9);
+  add(tw, box(6, .4, 2.2), stone, 0, .2, 9.2);
+  const hs = add(tw, new THREE.PlaneGeometry(3.4, 3.4), signMat('火', '#f4ecd8', '#b5402f', 1), 0, 6.8, 7.85);
+  hs.scale.set(1, 1, 1);
+
+  // Mont des Hokage
+  const rock = M(0x8a8478, {flatShading: true});
+  add(g, box(120, 46, 28), rock, 0, 23, -112);
+  add(g, new THREE.ConeGeometry(45, 60, 7), rock, -72, 30, -105);
+  add(g, new THREE.ConeGeometry(45, 60, 7), rock, 72, 30, -105);
+  add(g, new THREE.ConeGeometry(55, 70, 7), rock, 0, 35, -140);
+  const faceM = M(0xa39d90), hairM = M(0x4a463f), dark = M(0x3d3a34);
+  [-24, -8, 8, 24].forEach(x => {
+    const y = 30, z = -98;
+    add(g, new THREE.SphereGeometry(6.5, 20, 16), faceM, x, y, z).scale.set(1, 1.2, .8);
+    const hair = add(g, new THREE.SphereGeometry(6.8, 20, 10, 0, Math.PI * 2, 0, 1.0), hairM, x, y + .6, z + .3);
+    hair.scale.set(1, 1.2, .85); hair.rotation.x = .25;
+    for (const sx of [-1, 1]) add(g, box(1.7, .4, .4), dark, x + sx * 2.3, y + 1, z + 5.1);
+    add(g, box(.9, 2.2, 1), faceM, x, y - .8, z + 5.2);
+    add(g, box(2.8, .3, .4), dark, x, y - 3, z + 4.9);
+  });
+
+  // Porte du village
+  const gateM = M(0xa8321f);
+  for (const sx of [-1, 1]) add(g, box(2.4, 11, 2.4), gateM, sx * 10, 5.5, 72);
+  add(g, box(24, 2, 3), M(0x8e2a1a), 0, 11.5, 72);
+  add(g, pyr, M(0x4b3b34, {flatShading: true}), 0, 14.7, 72).scale.set(19.8, 3, 5.1);
+  const gs = signMat('火', '#f4ecd8', '#a8321f', 1);
+  add(g, new THREE.PlaneGeometry(1.8, 1.8), gs, 0, 11.5, 70.48).rotation.y = Math.PI;
+  add(g, new THREE.PlaneGeometry(1.8, 1.8), gs, 0, 11.5, 73.52);
+  for (const sx of [-1, 1]) {
+    add(g, box(50, 6, 2), M(0xd8c9a2), sx * 37, 3, 72);
+    add(g, box(50.6, .5, 2.6), M(0x4b3b34), sx * 37, 6.2, 72);
+  }
+
+  // Ichiraku Ramen
+  const st = new THREE.Group(); st.position.set(24, 0, -24); st.rotation.y = -Math.PI / 2; g.add(st);
+  add(st, box(5, 1, 1.4), wood, 0, .5, 0);
+  add(st, box(5.2, .1, 1.7), M(0xc79a63), 0, 1.05, 0);
+  add(st, box(5, 3, .3), M(0x6b4423), 0, 1.5, -1.5);
+  add(st, box(6, .3, 3.8), M(0xa8321f), 0, 3.3, -.1).rotation.x = .1;
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) add(st, new THREE.CylinderGeometry(.1, .1, 3.2, 8), wood, sx * 2.6, 1.6, sz * 1.5);
+  add(st, new THREE.PlaneGeometry(4.4, .9), signMat('一楽ラーメン', '#f4ecd8', '#b5402f', 4.9), 0, 2.85, 1.7);
+  for (const sx of [-1.8, -.6, .6, 1.8]) {
+    add(st, new THREE.CylinderGeometry(.28, .28, .15, 12), M(0xc79a63), sx, .65, 1.5);
+    add(st, new THREE.CylinderGeometry(.1, .1, .6, 8), wood, sx, .3, 1.5);
+  }
+
+  // Lanternes
+  const lamp = M(0xd8442a, {emissive: 0xff7a3a, emissiveIntensity: .8});
+  for (const z of [60, 50, 40, 30, 20, 0, -10]) for (const sx of [-1, 1]) {
+    add(g, new THREE.CylinderGeometry(.08, .08, 3, 6), wood, sx * 4.6, 1.5, z);
+    add(g, new THREE.SphereGeometry(.35, 12, 10), lamp, sx * 4.6, 3.2, z).scale.set(1, 1.3, 1);
+  }
+
+  // Arbres
+  for (const [x, z] of [[13, -12], [-13, -12], [19, -34], [-19, -34], [13, -50], [-13, -50]]) tree(g, x, z);
+  for (let i = 0; i < 70; i++) {
+    const x = (rnd() - .5) * 190, z = -90 + rnd() * 160;
+    if ((Math.abs(x) < 42 && z > -22 && z < 68) || (Math.abs(x) < 24 && z > -62 && z < -14) || (Math.abs(x) < 6)) continue;
+    if (z < -92 && Math.abs(x) < 70) continue;
+    tree(g, x, z);
+  }
+
+  // Nuages
+  const cl = M(0xffffff, {roughness: 1, emissive: 0xffffff, emissiveIntensity: .5});
+  for (let i = 0; i < 9; i++) {
+    const c = new THREE.Group(); c.position.set((rnd() - .5) * 300, 70 + rnd() * 25, -60 - rnd() * 140); g.add(c);
+    for (let k = 0; k < 3; k++) add(c, new THREE.SphereGeometry(8 + rnd() * 4, 10, 8), cl, k * 9 - 9, 0, 0).scale.set(1.4, .5, .9);
+  }
+}
+AFRAME.registerComponent('konoha', {
+  init() { const g = new THREE.Group(); this.el.setObject3D('konoha', g); build(g); }
+});
+
+/* ============================ MAINS VR ============================ */
+const MAXC = [1.35, 1.6, 1.1];
+AFRAME.registerComponent('ninja-hand', {
+  schema: {side: {default: 'right'}},
+  init() {
+    const s = this.s = this.data.side === 'left' ? -1 : 1;
+    const skin = M(0xe3b090, {roughness: .55}), nailM = M(0xf2cdb8, {roughness: .3});
+    const root = new THREE.Group(); root.position.set(0, 0, .05); this.el.object3D.add(root);
+    this.root = root;
+    const palm = add(root, new THREE.SphereGeometry(1, 22, 16), skin, 0, 0, -.045); palm.scale.set(.016, .043, .05);
+    const kn = new THREE.CapsuleGeometry(.0135, .062, 4, 12);
+    add(root, kn, skin, 0, -.002, -.088).scale.set(.85, 1, 1);
+    const wg = new THREE.CapsuleGeometry(.027, .03, 4, 14); wg.rotateX(Math.PI / 2);
+    add(root, wg, skin, 0, 0, .02).scale.set(.85, 1, 1);
+    this.wrist = new THREE.Object3D(); this.wrist.position.set(0, 0, .045); root.add(this.wrist);
+
+    const seg = (r, len) => {
+      const gm = new THREE.CapsuleGeometry(r, Math.max(len - 2 * r, .001), 4, 10);
+      gm.rotateX(Math.PI / 2); gm.translate(0, 0, -len / 2); return gm;
+    };
+    const mk = (x, y, z, lens, r0, splay) => {
+      const base = new THREE.Group(); base.position.set(x, y, z); base.rotation.x = splay; root.add(base);
+      const j = []; let parent = base;
+      lens.forEach((L, i) => {
+        const r = r0 * (1 - i * .1), n = new THREE.Group();
+        if (i > 0) n.position.z = -lens[i - 1];
+        parent.add(n);
+        add(n, seg(r, L), skin, 0, 0, 0);
+        add(n, new THREE.SphereGeometry(r * 1.02, 12, 10), skin, 0, 0, 0);
+        if (i === lens.length - 1) add(n, new THREE.SphereGeometry(r * .8, 10, 8), nailM, s * r * .72, 0, -L * .55).scale.set(.3, .9, 1.4);
+        j.push(n); parent = n;
+      });
+      return {base, j};
+    };
+    this.f = [
+      mk(0, .031, -.093, [.042, .026, .022], .0098, .07),
+      mk(0, .011, -.095, [.046, .029, .023], .0102, .02),
+      mk(0, -.009, -.092, [.042, .027, .022], .0095, -.03),
+      mk(0, -.027, -.086, [.034, .021, .019], .0082, -.09)
+    ];
+    this.th = mk(-s * .012, .036, -.03, [.048, .038, .03], .0125, 0);
+    this.th.base.rotation.order = 'YXZ';
+
+    this.tt = 0; this.gg = 0; this.touch = 0; this.c = {t: 0, g: 0, h: 0};
+    const el = this.el;
+    el.addEventListener('triggerchanged', e => { this.tt = e.detail.value; });
+    el.addEventListener('gripchanged', e => { this.gg = e.detail.value; });
+    ['abutton', 'bbutton', 'xbutton', 'ybutton', 'thumbstick', 'thumbrest', 'surface'].forEach(n => {
+      el.addEventListener(n + 'touchstart', () => { this.touch++; });
+      el.addEventListener(n + 'touchend', () => { this.touch = Math.max(0, this.touch - 1); });
+    });
+  },
+  tick(t, dt) {
+    const k = 1 - Math.exp(-dt * .018), c = this.c, s = this.s;
+    c.t += (this.tt - c.t) * k; c.g += (this.gg - c.g) * k;
+    c.h += (Math.max(this.touch > 0 ? .6 : 0, this.gg * .6, this.tt * .3) - c.h) * k;
+    const idx = Math.min(1, .12 + .88 * c.t + .3 * c.g), oth = .2 + .8 * c.g;
+    this.f.forEach((f, i) => {
+      const cu = i === 0 ? idx : oth;
+      f.j.forEach((n, q) => { n.rotation.y = s * cu * MAXC[q]; });
+    });
+    const th = this.th, h = c.h;
+    th.base.rotation.set(.55 - .25 * h, s * (.35 + .55 * h), 0);
+    th.j[1].rotation.y = s * (.12 + .9 * h);
+    th.j[2].rotation.y = s * (.1 + .8 * h);
+  }
+});
+
+/* ============================ CORPS VR ============================ */
+AFRAME.registerComponent('ninja-body', {
+  init() {
+    const V = THREE.Vector3, cy = new THREE.CylinderGeometry(1, 1, 1, 18), sp = new THREE.SphereGeometry(1, 14, 10);
+    const jacket = M(0xf08a1c), pants = M(0xe0701a), navy = M(0x1c2a5c), skin = M(0xe3b090, {roughness: .55});
+    const root = new THREE.Group(); root.visible = false; this.el.setObject3D('body', root); this.root = root;
+    const mk = (g, m) => { const o = new THREE.Mesh(g, m); root.add(o); return o; };
+    this.torso = mk(cy, jacket); this.hips = mk(cy, pants); this.collar = mk(cy, navy);
+    this.legs = [mk(cy, pants), mk(cy, pants)];
+    this.feet = [mk(box(.1, .07, .26), navy), mk(box(.1, .07, .26), navy)];
+    this.arm = [-1, 1].map(() => ({up: mk(cy, jacket), fo: mk(cy, jacket), cuff: mk(cy, navy), sh: mk(sp, jacket), el: mk(sp, jacket)}));
+    this.yaw = 0; this.vr = false;
+    this.P = {head: new V(), q: new THREE.Quaternion(), e: new THREE.Euler(), f: new V(), fwd: new V(), right: new V(),
+      S: new V(), W: new V(), E: new V(), D: new V(), pole: new V(), tmp: new V(), up: new V(0, 1, 0)};
+    const sc = this.el.sceneEl;
+    sc.addEventListener('enter-vr', () => { this.vr = true; root.visible = true; });
+    sc.addEventListener('exit-vr', () => { this.vr = false; root.visible = false; });
+    this.hands = {'-1': document.getElementById('lhand'), '1': document.getElementById('rhand')};
+    this.rig = document.getElementById('rig').object3D;
+  },
+  seg(m, A, B, r) {
+    const P = this.P; P.tmp.subVectors(B, A); const len = P.tmp.length();
+    m.position.addVectors(A, B).multiplyScalar(.5); m.scale.set(r, Math.max(len, .001), r);
+    m.quaternion.setFromUnitVectors(P.up, P.tmp.divideScalar(len || 1));
+  },
+  tick() {
+    if (!this.vr) return;
+    const cam = this.el.sceneEl.camera; if (!cam) return;
+    const P = this.P;
+    cam.getWorldPosition(P.head); cam.getWorldQuaternion(P.q); P.e.setFromQuaternion(P.q, 'YXZ');
+    let dy = P.e.y - this.yaw; dy = Math.atan2(Math.sin(dy), Math.cos(dy)); this.yaw += dy * .2;
+    const y = this.yaw, sn = Math.sin(y), cs = Math.cos(y);
+    P.fwd.set(-sn, 0, -cs); P.right.set(cs, 0, -sn);
+    const floor = this.rig.getWorldPosition(P.f).y, H = Math.max(P.head.y - floor, 1);
+    const bx = P.head.x - P.fwd.x * .07, bz = P.head.z - P.fwd.z * .07;
+    const shY = floor + H - .25, hipY = floor + H * .54;
+
+    const top = shY + .05, bot = hipY - .02;
+    this.torso.position.set(bx, (top + bot) / 2, bz); this.torso.scale.set(.17, top - bot, .105); this.torso.rotation.y = y;
+    this.hips.position.set(bx, hipY - .03, bz); this.hips.scale.set(.165, .22, .105); this.hips.rotation.y = y;
+    this.collar.position.set(bx, shY + .06, bz); this.collar.scale.set(.1, .08, .085); this.collar.rotation.y = y;
+    [-1, 1].forEach((sd, i) => {
+      const lx = bx + P.right.x * sd * .09, lz = bz + P.right.z * sd * .09, ll = hipY - floor - .08;
+      this.legs[i].position.set(lx, floor + .08 + ll / 2, lz); this.legs[i].scale.set(.075, ll, .075);
+      this.feet[i].position.set(lx + P.fwd.x * .05, floor + .035, lz + P.fwd.z * .05); this.feet[i].rotation.y = y;
+    });
+
+    [-1, 1].forEach((sd, i) => {
+      const a = this.arm[i], hel = this.hands[sd], hc = hel.components['ninja-hand'];
+      const show = !!(hc && hel.object3D.visible);
+      Object.values(a).forEach(m => { m.visible = show; });
+      if (!show) return;
+      hel.object3D.updateMatrixWorld(true);
+      hc.wrist.getWorldPosition(P.W);
+      P.S.set(bx + P.right.x * sd * .2, shY, bz + P.right.z * sd * .2);
+      P.D.subVectors(P.W, P.S);
+      const d = P.D.length(); if (d < 1e-4) return;
+      P.D.divideScalar(d);
+      const L1 = .30, L2 = .29, dd = Math.min(d, L1 + L2 - .005);
+      const aa = (L1 * L1 - L2 * L2 + dd * dd) / (2 * dd), hh = Math.sqrt(Math.max(L1 * L1 - aa * aa, 0));
+      P.pole.set(0, -1, 0).addScaledVector(P.right, sd * .6).addScaledVector(P.fwd, -.3);
+      P.pole.addScaledVector(P.D, -P.pole.dot(P.D)).normalize();
+      P.E.copy(P.S).addScaledVector(P.D, aa).addScaledVector(P.pole, hh);
+      this.seg(a.up, P.S, P.E, .05);
+      this.seg(a.fo, P.E, P.W, .04);
+      a.sh.position.copy(P.S); a.sh.scale.setScalar(.058);
+      a.el.position.copy(P.E); a.el.scale.setScalar(.046);
+      P.tmp.subVectors(P.W, P.E).normalize();
+      P.E.copy(P.W).addScaledVector(P.tmp, -.035);
+      a.cuff.position.copy(P.E); a.cuff.scale.set(.047, .07, .047);
+      a.cuff.quaternion.setFromUnitVectors(P.up, P.tmp);
+    });
+  }
+});
+
+/* Déplacement minimal au stick gauche (pour explorer en VR) */
+AFRAME.registerComponent('stick-move', {
+  init() {
+    this.a = [0, 0]; this.q = new THREE.Quaternion(); this.e = new THREE.Euler();
+    this.el.addEventListener('thumbstickmoved', e => { this.a = [e.detail.x, e.detail.y]; });
+    this.rig = document.getElementById('rig').object3D;
+  },
+  tick(t, dt) {
+    const [x, y] = this.a; if (Math.abs(x) < .15 && Math.abs(y) < .15) return;
+    const cam = this.el.sceneEl.camera; if (!cam) return;
+    cam.getWorldQuaternion(this.q); this.e.setFromQuaternion(this.q, 'YXZ');
+    const yaw = this.e.y, v = 3 * dt / 1000;
+    this.rig.position.x += (Math.cos(yaw) * x + Math.sin(yaw) * y) * v;
+    this.rig.position.z += (-Math.sin(yaw) * x + Math.cos(yaw) * y) * v;
+  }
+});
+
+/* ============================ MENU ============================ */
+const scene = document.getElementById('scene'), menu = document.getElementById('menu'), msg = document.getElementById('msg'),
+  btnPC = document.getElementById('btnPC'), btnVR = document.getElementById('btnVR'), hud = document.getElementById('hud'),
+  rig = document.getElementById('rig'), cam = document.getElementById('cam');
+
+function ready() { btnPC.disabled = btnVR.disabled = false; msg.textContent = ''; }
+scene.hasLoaded ? ready() : scene.addEventListener('loaded', ready);
+
+btnPC.addEventListener('click', () => {
+  menu.classList.add('hidden'); hud.style.display = 'block';
+  rig.setAttribute('wasd-controls', 'enabled', true);
+  cam.setAttribute('look-controls', 'enabled', true);
+  if (scene.canvas && scene.canvas.requestPointerLock) scene.canvas.requestPointerLock();
+});
+
+btnVR.addEventListener('click', async () => {
+  try {
+    if (!navigator.xr || !(await navigator.xr.isSessionSupported('immersive-vr'))) throw new Error('nosupport');
+    hud.style.display = 'none'; menu.classList.add('hidden');
+    await scene.enterVR();
+  } catch (e) {
+    menu.classList.remove('hidden');
+    msg.textContent = 'VR indisponible : ouvre la page depuis un casque compatible WebXR, en https ou via localhost.';
+  }
+});
+scene.addEventListener('exit-vr', () => { menu.classList.remove('hidden'); });
+})();
+</script>
+</body>
+</html>
