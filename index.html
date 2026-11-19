@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Konoha RPG – Étape 1 (v2)</title>
+<title>Konoha RPG – Étape 1 (v3)</title>
 <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
 <style>
   :root{--ink:#14181f;--paper:#f3e9d2;--leaf:#f0861f;--mute:#b9ae94}
@@ -42,7 +42,7 @@
   </div>
   <div class="kanji" aria-hidden="true">木ノ葉</div>
 </div>
-<div id="hud">ZQSD / WASD / flèches : marcher · Souris : regarder · Clic : verrouiller la souris · Échap : libérer</div>
+<div id="hud">ZQSD / WASD / flèches : marcher (Maj : courir) · Souris : regarder · Clic : verrouiller la souris · Échap : libérer</div>
 
 <a-scene id="scene" vr-mode-ui="enabled:false" loading-screen="enabled:false" device-orientation-permission-ui="enabled:false"
          background="color:#9fd0ec" fog="type:linear;color:#cfe3ee;near:60;far:260" renderer="antialias:true">
@@ -53,12 +53,12 @@
 
   <a-entity konoha></a-entity>
 
-  <a-entity id="rig" position="0 0 64" wasd-controls="acceleration:90;enabled:false">
+  <a-entity id="rig" position="0 0 64" locomotion>
     <a-entity id="cam" camera="near:.05;far:600" position="0 1.65 0" look-controls="pointerLockEnabled:true;enabled:false"></a-entity>
+    <!-- Les manettes DOIVENT être enfants du rig : sinon leur pose reste ancrée à l'origine du monde (bras étirés à l'autre bout de la map) -->
+    <a-entity id="lhand" oculus-touch-controls="hand:left;model:false" ninja-hand="side:left"></a-entity>
+    <a-entity id="rhand" oculus-touch-controls="hand:right;model:false" ninja-hand="side:right"></a-entity>
   </a-entity>
-
-  <a-entity id="lhand" oculus-touch-controls="hand:left;model:false" ninja-hand="side:left" stick-move></a-entity>
-  <a-entity id="rhand" oculus-touch-controls="hand:right;model:false" ninja-hand="side:right"></a-entity>
   <a-entity id="body" ninja-body></a-entity>
 </a-scene>
 
@@ -220,87 +220,119 @@ AFRAME.registerComponent('konoha', {
 });
 
 /* ============================ AVATAR : configuration & API ============================ */
-/* Tout ce qui est personnalisable (couleurs, parties visibles, textures) passe par AVATAR / window.Avatar. */
+/* Corps, bras ET mains viennent du modèle naruto.glb (embarqué en base64). Tout est personnalisable via AVATAR / window.Avatar. */
 const AVATAR = {
-  skin: '#e9b6a4', sleeve: '#e8822e', cuff: '#2a3f78',
-  show: {head: false, arms: false, hands: false, body: true},   // parties du modèle GLB affichées en VR
-  cut: {head: 1.62, arm: .29, armY: 1.4},                       // découpe du modèle (coordonnées d'origine du GLB)
-  modelEyeY: 1.84, shoulderX: .28, shoulderY: 1.58
+  show: {head: false, arms: true, hands: true, body: true, legs: true},
+  cut: {head: 1.62, arm: .29, armY: 1.4},   // découpe du GLB (coordonnées d'origine : x, y, z = haut)
+  modelEyeY: 1.84,                          // hauteur des yeux dans le modèle
+  reach: .34,                               // longueur épaule→poignet = reach × taille du joueur
+  handScale: .70,                           // échelle des mains du modèle sur les manettes
+  legY: 1.0,                                // sous cette hauteur (GLB), le pantalon/jambes/pieds sont animés
+  maxReach: 1.3                             // au-delà (pose invalide) bras et mains sont masqués
 };
-const skinMat = M(AVATAR.skin, {roughness: .55}), sleeveMat = M(AVATAR.sleeve, {roughness: .8}),
-  cuffMat = M(AVATAR.cuff, {roughness: .7}), nailMat = M(0xf4d3c4, {roughness: .3});
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+const NODE = new THREE.Matrix4().set(1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1);   // repère du GLB -> repère canonique (haut = y, face = +z)
 
-/* Tube lissé le long de l'axe Y (optionnellement skinné sur 3 os) */
-function capped(r, start, end) {
-  const o = r.slice(), f = r[0], l = r[r.length - 1];
-  for (let j = 1; j <= 3; j++) {
-    const a = j / 3 * Math.PI / 2, c = Math.max(Math.cos(a), 1e-4);
-    if (end) o.push({y: l.y + l.rz * Math.sin(a), rx: l.rx * c, rz: l.rz * c});
-    if (start) o.unshift({y: f.y - f.rz * Math.sin(a), rx: f.rx * c, rz: f.rz * c});
-  }
-  return o;
+function subGeo(g, idx) {
+  const ng = new THREE.BufferGeometry();
+  for (const k in g.attributes) ng.setAttribute(k, g.attributes[k].clone());
+  ng.setIndex(idx.slice()); ng.applyMatrix4(NODE); return ng;
 }
-const jointW = (j1, j2, w1, w2) => y => { const a = sstep(j1 - w1, j1 + w1, y), b = sstep(j2 - w2, j2 + w2, y); return [0, 1, 2, 1 - a, a * (1 - b), a * b]; };
-function loft(rings, seg, wf) {
-  const pos = [], idx = [], si = [], sw = [];
-  rings.forEach(r => {
-    for (let k = 0; k < seg; k++) {
-      const a = k / seg * Math.PI * 2; pos.push(r.rx * Math.cos(a), r.y, r.rz * Math.sin(a));
-      if (wf) { const w = wf(r.y); si.push(w[0], w[1], w[2], 0); sw.push(w[3], w[4], w[5], 0); }
-    }
+function addSkin(g, wf) {
+  const P = g.attributes.position, n = P.count, si = new Uint16Array(n * 4), sw = new Float32Array(n * 4);
+  for (let v = 0; v < n; v++) wf(Math.abs(P.getX(v)), P.getY(v), P.getZ(v), si, sw, v * 4);
+  g.setAttribute('skinIndex', new THREE.BufferAttribute(si, 4)); g.setAttribute('skinWeight', new THREE.BufferAttribute(sw, 4));
+}
+function eachV(geos, fn) { geos.forEach(g => { const P = g.attributes.position; for (let i = 0; i < P.count; i++) fn(P.getX(i), P.getY(i), P.getZ(i)); }); }
+
+/* ---------- Mains : mesh du GLB skinné (os par doigt, repères mesurés sur le modèle) ---------- */
+const TIP = [1.031, 1.034, 1.019, .992, .936];                       // |x| du bout de chaque doigt (index, majeur, annulaire, auriculaire, pouce)
+const baseOf = d => d === 4 ? .85 : .868;
+function digit(ax, y, z) {
+  if (ax < .845) return -1;
+  if (z > 0 && y < 1.6) return 4;
+  return z > -.0215 ? 0 : z > -.0565 ? 1 : z > -.09 ? 2 : 3;
+}
+function handW(ax, y, z, si, sw, o) {
+  si[o] = 0; sw[o] = 1; const d = digit(ax, y, z); if (d < 0) return;
+  const base = baseOf(d), seg = (TIP[d] - base) / 3, w = .012, b = 1 + 3 * d;
+  const a0 = sstep(base - w, base + w, ax), a1 = sstep(base + seg - w, base + seg + w, ax), a2 = sstep(base + 2 * seg - w, base + 2 * seg + w, ax);
+  si[o + 1] = b; si[o + 2] = b + 1; si[o + 3] = b + 2;
+  sw[o] = 1 - a0; sw[o + 1] = a0 * (1 - a1); sw[o + 2] = a1 * (1 - a2); sw[o + 3] = a2;
+}
+function makeHandRig(src, sx) {
+  const geos = src.map(s => subGeo(s.g, s.idx));
+  let minx = 9; eachV(geos, x => { minx = Math.min(minx, Math.abs(x)); });
+  let wy = 0, wz = 0, wc = 0; const cen = [0, 1, 2, 3, 4].map(() => ({y: 0, z: 0, c: 0}));
+  eachV(geos, (x, y, z) => {
+    const ax = Math.abs(x); if (ax < minx + .012) { wy += y; wz += z; wc++; }
+    const d = digit(ax, y, z); if (d >= 0 && ax < baseOf(d) + .07) { cen[d].y += y; cen[d].z += z; cen[d].c++; }
   });
-  for (let i = 0; i < rings.length - 1; i++) for (let k = 0; k < seg; k++) {
-    const a = i * seg + k, b = i * seg + (k + 1) % seg, c = a + seg, d = b + seg; idx.push(a, c, b, b, c, d);
+  const root = new THREE.Bone(), bones = [root], f = [];
+  for (let d = 0; d < 5; d++) {
+    const base = baseOf(d), seg = (TIP[d] - base) / 3, c = cen[d], b0 = new THREE.Bone(), b1 = new THREE.Bone(), b2 = new THREE.Bone();
+    b0.position.set(sx * base, c.c ? c.y / c.c : 1.6, c.c ? c.z / c.c : -.05); b1.position.set(sx * seg, 0, 0); b2.position.set(sx * seg, 0, 0);
+    root.add(b0); b0.add(b1); b1.add(b2); bones.push(b0, b1, b2); f.push([b0, b1, b2]);
   }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setIndex(idx);
-  if (wf) { g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(si, 4)); g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(sw, 4)); }
-  g.computeVertexNormals(); return g;
-}
-function skinned(geo, mat, bones) {
-  const m = new THREE.SkinnedMesh(geo, mat); m.frustumCulled = false; return m;
-}
-
-/* ============================ MAIN VR (SkinnedMesh : 1 maillage continu par doigt, 3 os) ============================ */
-const MAXC = [1.35, 1.6, 1.1];
-const FING = [
-  {x: -.0285, k: .100, L: [.040, .024, .020], r: .0092, sp: .06},
-  {x: -.0095, k: .104, L: [.044, .027, .021], r: .0095, sp: 0},
-  {x: .0095, k: .100, L: [.040, .025, .020], r: .0088, sp: -.04},
-  {x: .0275, k: .092, L: [.032, .019, .018], r: .0078, sp: -.09}
-];
-const THUMB = {L: [.046, .032, .026], r: .0125};
-
-function makeFinger(d, s, px, py, pz, sp) {
-  const [L1, L2, L3] = d.L, r = d.r;
-  const pts = [[-.008, .95], [0, 1], [L1 * .5, .93], [L1, 1.04], [L1 + L2 * .5, .9], [L1 + L2, .96], [L1 + L2 + L3 * .55, .84], [L1 + L2 + L3, .66]];
-  const geo = loft(capped(pts.map(([y, f]) => ({y, rx: r * f, rz: r * f * .9})), false, true), 12, jointW(L1, L1 + L2, .008, .007));
-  const b0 = new THREE.Bone(), b1 = new THREE.Bone(), b2 = new THREE.Bone();
-  b1.position.y = L1; b2.position.y = L2; b0.add(b1); b1.add(b2);
-  const mesh = skinned(geo, skinMat); mesh.add(b0); mesh.updateMatrixWorld(true);
-  mesh.bind(new THREE.Skeleton([b0, b1, b2]));
-  const nail = new THREE.Mesh(new THREE.SphereGeometry(1, 8, 6), nailMat);
-  nail.position.set(0, L3 * .55, r * .72); nail.scale.set(r * .62, L3 * .3, r * .24); b2.add(nail);
-  const pv = new THREE.Group(); pv.position.set(px, py, pz); pv.rotation.order = 'YXZ';
-  const or = new THREE.Group(); or.rotation.x = -Math.PI / 2; pv.add(or); or.add(mesh);
-  return {pv, b: [b0, b1, b2]};
+  const G = new THREE.Group(), meshes = geos.map((g, i) => {
+    addSkin(g, handW); const m = new THREE.SkinnedMesh(g, src[i].mat); m.frustumCulled = false; G.add(m); return m;
+  });
+  meshes[0].add(root); G.updateMatrixWorld(true);
+  const sk = new THREE.Skeleton(bones); meshes.forEach(m => m.bind(sk));
+  return {group: G, meshes, sx, wrist: [sx * minx, wy / wc, wz / wc], f: f.slice(0, 4), th: f[4]};
 }
 
+/* ---------- Bras : manche du GLB skinnée sur 3 os (épaule, coude, poignet) ---------- */
+const armW = (ax, y, z, si, sw, o) => {
+  const a = sstep(.42, .56, ax), b = sstep(.59, .63, ax);
+  si[o] = 0; si[o + 1] = 1; si[o + 2] = 2; sw[o] = 1 - a; sw[o + 1] = a * (1 - b); sw[o + 2] = a * b;
+};
+function makeArmRig(src, sx) {
+  const geos = src.map(s => subGeo(s.g, s.idx));
+  const ctr = x0 => { let y = 0, z = 0, c = 0; eachV(geos, (x, py, pz) => { if (Math.abs(Math.abs(x) - x0) < .035) { y += py; z += pz; c++; } }); return c ? [y / c, z / c] : null; };
+  const c1 = ctr(.27) || [1.6, -.05], c2 = ctr(.49) || c1, c3 = ctr(.735) || c2;
+  const J = [new THREE.Vector3(sx * .27, c1[0], c1[1]), new THREE.Vector3(sx * .49, c2[0], c2[1]), new THREE.Vector3(sx * .735, c3[0], c3[1])];
+  const G = new THREE.Group(), bones = J.map(j => { const b = new THREE.Bone(); b.position.copy(j); G.add(b); return b; });
+  const meshes = geos.map((g, i) => { addSkin(g, armW); const m = new THREE.SkinnedMesh(g, src[i].mat); m.frustumCulled = false; G.add(m); return m; });
+  G.updateMatrixWorld(true);
+  const sk = new THREE.Skeleton(bones); meshes.forEach(m => m.bind(sk));
+  return {G, bones, meshes, J, sx, L1: J[0].distanceTo(J[1]), L2: J[1].distanceTo(J[2])};
+}
+
+/* ---------- Jambes : pantalon + pieds du GLB skinnés (hanche -> genou), animés par la marche ---------- */
+function makeLegRig(src) {
+  const root = new THREE.Bone(), tL = new THREE.Bone(), sL = new THREE.Bone(), tR = new THREE.Bone(), sR = new THREE.Bone();
+  tL.position.set(.1, 0, .85); sL.position.set(0, 0, -.37); tR.position.set(-.1, 0, .85); sR.position.set(0, 0, -.37);
+  root.add(tL, tR); tL.add(sL); tR.add(sR);
+  const bones = [root, tL, sL, tR, sR], par = src[0].par;
+  const meshes = src.map(sr => {
+    const g = new THREE.BufferGeometry(); for (const k in sr.g.attributes) g.setAttribute(k, sr.g.attributes[k].clone());
+    g.setIndex(sr.idx.slice());
+    const P = g.attributes.position, n = P.count, si = new Uint16Array(n * 4), sw = new Float32Array(n * 4);
+    for (let v = 0; v < n; v++) {                                   // coordonnées d'origine du GLB : x = côté, z = haut
+      const x = P.getX(v), z = P.getZ(v);
+      const t = 1 - sstep(.78, .95, z), k = 1 - sstep(.42, .56, z), r = sstep(-.05, .05, x);   // r = poids du côté x>0
+      const w = [1 - t, t * (1 - k) * r, t * k * r, t * (1 - k) * (1 - r), t * k * (1 - r)];
+      const ord = [0, 1, 2, 3, 4].sort((a, b) => w[b] - w[a]).slice(0, 4), sum = ord.reduce((a, i) => a + w[i], 0) || 1;
+      ord.forEach((bi, j) => { si[v * 4 + j] = bi; sw[v * 4 + j] = w[bi] / sum; });
+    }
+    g.setAttribute('skinIndex', new THREE.BufferAttribute(si, 4)); g.setAttribute('skinWeight', new THREE.BufferAttribute(sw, 4));
+    const m = new THREE.SkinnedMesh(g, sr.mat); m.frustumCulled = false; par.add(m); return m;
+  });
+  meshes[0].add(root); par.updateWorldMatrix(true, true);
+  const sk = new THREE.Skeleton(bones); meshes.forEach(m => m.bind(sk));
+  return {meshes, tL, sL, tR, sR};
+}
+
+const MAXC = [1.0, 1.3, .9];
 AFRAME.registerComponent('ninja-hand', {
   schema: {side: {default: 'right'}},
   init() {
     const s = this.s = this.data.side === 'left' ? -1 : 1;
-    const g = new THREE.Group(); g.position.set(0, 0, .055); g.rotation.z = -s * Math.PI / 2; this.el.object3D.add(g); this.root = g;
-    this.wrist = new THREE.Object3D(); g.add(this.wrist);
-    const pr = [[0, .031, .021], [.02, .036, .0225], [.05, .043, .025], [.08, .046, .0225], [.1, .045, .018]].map(([y, rx, rz]) => ({y, rx, rz}));
-    const po = new THREE.Group(); po.rotation.x = -Math.PI / 2; g.add(po);
-    po.add(new THREE.Mesh(loft(capped(pr, true, true), 18), skinMat));
-    this.f = FING.map(d => { const f = makeFinger(d, s, s * d.x, 0, -d.k); f.pv.rotation.y = s * d.sp; g.add(f.pv); return f; });
-    this.th = makeFinger(THUMB, s, -s * .031, -.005, -.03); this.th.pv.rotation.set(-.2, s * .55, 0); g.add(this.th.pv);
-
-    this.tt = 0; this.gg = 0; this.touch = {}; this.c = {i: .1, o: .12, t: .1};
+    const g = new THREE.Group(); g.position.set(0, 0, .05); g.rotation.z = -s * Math.PI / 2; g.visible = false; this.el.object3D.add(g); this.root = g;
+    const g2 = new THREE.Group(); g2.rotation.y = -s * Math.PI / 2; g2.scale.setScalar(AVATAR.handScale); g.add(g2); this.wrist = g2;
+    this.rig = null; this.tt = 0; this.gg = 0; this.touch = {}; this.c = {i: .05, o: .08, t: .05};
     const el = this.el;
     el.addEventListener('triggerchanged', e => { this.tt = e.detail.value; });
     el.addEventListener('gripchanged', e => { this.gg = e.detail.value; });
@@ -310,52 +342,45 @@ AFRAME.registerComponent('ninja-hand', {
     });
     el.addEventListener('controllerdisconnected', () => { this.touch = {}; this.tt = this.gg = 0; });
   },
+  mount(rig) {
+    this.rig = rig; const w = rig.wrist;
+    rig.group.position.set(-w[0], -w[1], -w[2]); this.wrist.add(rig.group);
+  },
   tick(t, dt) {
+    const rig = this.rig; if (!rig) return;
     dt = Math.min(dt || 16, 60);
-    const k = 1 - Math.exp(-dt / 55), c = this.c, s = this.s;
+    const k = 1 - Math.exp(-dt / 55), c = this.c, sx = rig.sx;
     const down = Object.values(this.touch).some(Boolean);
-    const tI = Math.min(1, .1 + .9 * this.tt + .25 * this.gg), tO = .12 + .88 * this.gg;
-    const tT = Math.min(1, Math.max(down ? .7 : 0, this.gg * .6, this.tt * .3) + .08);
+    const tI = Math.min(1, .05 + .95 * this.tt + .25 * this.gg), tO = .08 + .92 * this.gg;
+    const tT = Math.min(1, Math.max(down ? .7 : 0, this.gg * .6, this.tt * .3) + .05);
     c.i += (tI - c.i) * k; c.o += (tO - c.o) * k; c.t += (tT - c.t) * k;
     const mul = [1, .97, 1, 1.05];
-    this.f.forEach((f, i) => {
+    rig.f.forEach((f, i) => {
       const cu = i === 0 ? c.i : Math.min(1, c.o * mul[i]);
-      f.b.forEach((n, q) => { n.rotation.x = -cu * MAXC[q]; });
+      f.forEach((n, q) => { n.rotation.z = -sx * cu * MAXC[q]; });
     });
-    const th = this.th;
-    th.pv.rotation.y = s * (.55 - .35 * c.t);
-    th.b[0].rotation.x = -c.t * .5; th.b[1].rotation.x = -c.t * .9; th.b[2].rotation.x = -c.t * .8;
+    const th = rig.th;
+    th[0].rotation.y = sx * c.t * .5; th[0].rotation.z = -sx * c.t * .4;
+    th[1].rotation.z = -sx * c.t * .7; th[2].rotation.z = -sx * c.t * .6;
   }
 });
 
-/* ============================ CORPS VR : modèle GLB + bras skinnés (IK 2 os) ============================ */
-function makeArm() {
-  const L1 = .30, L2 = .26;
-  const pts = [[0, .056], [.06, .054], [L1 * .5, .048], [L1 - .03, .042], [L1, .044], [L1 + .04, .042], [L1 + L2 * .45, .037], [L1 + L2 - .03, .031], [L1 + L2 + .02, .030]];
-  const geo = loft(capped(pts.map(([y, r]) => ({y, rx: r, rz: r})), true, false), 14, jointW(L1, L1 + L2, .05, .02));
-  const G = new THREE.Group(), bones = [new THREE.Bone(), new THREE.Bone(), new THREE.Bone()];
-  bones[1].position.y = L1; bones[2].position.y = L1 + L2;
-  const mesh = skinned(geo, sleeveMat); G.add(mesh); bones.forEach(b => G.add(b)); G.updateMatrixWorld(true);
-  mesh.bind(new THREE.Skeleton(bones));
-  const cuff = new THREE.Mesh(new THREE.CylinderGeometry(.036, .034, .05, 16), cuffMat); cuff.position.y = -.03; bones[2].add(cuff);
-  return {G, bones, L1, L2};
-}
-
+/* ============================ CORPS VR : GLB + IK des bras ============================ */
 AFRAME.registerComponent('ninja-body', {
   init() {
     const V = THREE.Vector3;
     this.root = new THREE.Group(); this.root.visible = false; this.el.setObject3D('avatar', this.root);
     this.armsG = new THREE.Group(); this.armsG.visible = false; this.el.setObject3D('arms', this.armsG);
-    this.arm = [-1, 1].map(() => { const a = makeArm(); this.armsG.add(a.G); a.pole = new V(0, -1, 0); return a; });
-    this.yaw = 0; this.vr = false;
-    this.P = {head: new V(), q: new THREE.Quaternion(), e: new THREE.Euler(), f: new V(), fwd: new V(), right: new V(), S: new V(), S0: new V(),
-      W: new V(), E: new V(), D: new V(), t1: new V(), t2: new V(), up: new V(0, 1, 0)};
+    this.armRig = {}; this.yaw = 0; this.vr = false;
+    this.P = {head: new V(), q: new THREE.Quaternion(), q0: new THREE.Quaternion(), q1: new THREE.Quaternion(), e: new THREE.Euler(), f: new V(), fwd: new V(), right: new V(),
+      S: new V(), S0: new V(), W: new V(), E: new V(), D: new V(), t1: new V(), t2: new V(), ax: new V()};
     this.hands = {'-1': document.getElementById('lhand'), '1': document.getElementById('rhand')};
     this.rig = document.getElementById('rig').object3D;
+    this.pole = {'-1': new V(0, -1, 0), '1': new V(0, -1, 0)};
     const sc = this.el.sceneEl;
     sc.addEventListener('enter-vr', () => { this.vr = true; this.root.visible = true; this.armsG.visible = true; });
     sc.addEventListener('exit-vr', () => { this.vr = false; this.root.visible = false; this.armsG.visible = false; });
-    this.parts = {head: [], arms: [], hands: [], body: []};
+    this.parts = {head: [], body: [], arms: [], hands: [], legs: []}; this.ph = 0; this.spd = 0; this.amp = 0; this.lp = null;
     this.loadModel();
   },
   loadModel() {
@@ -365,34 +390,63 @@ AFRAME.registerComponent('ninja-body', {
     const av = document.createElement('a-entity');
     av.setAttribute('gltf-model', URL.createObjectURL(new Blob([u8], {type: 'model/gltf-binary'})));
     av.addEventListener('model-loaded', () => this.setup(av.getObject3D('mesh')));
-    av.addEventListener('model-error', () => console.warn('naruto.glb : chargement impossible, bras seuls affichés'));
+    av.addEventListener('model-error', () => console.warn('naruto.glb : chargement impossible'));
     this.el.appendChild(av);
   },
   setup(model) {
     if (!model) return;
-    const parts = this.parts, meshes = [];
+    const parts = this.parts, meshes = [], C = AVATAR.cut;
+    const armSrc = {p: [], n: []}, handSrc = {p: [], n: []}, legSrc = [];
     model.traverse(o => { if (o.isMesh) meshes.push(o); });
     const byNode = {Object_2: 'face.png', Object_3: 'hands.png', Object_4: 'palms.png', Object_5: 'tex01.png', Object_6: 'tex02.png'};
     meshes.forEach(m => {
-      const n = (m.material && m.material.name) || byNode[m.name] || m.name;
-      if (n === 'face.png') { parts.head.push(m); return; }
-      if (n === 'hands.png' || n === 'palms.png') { parts.hands.push(m); return; }
-      const g = m.geometry, P = g.attributes.position, I = g.index.array, C = AVATAR.cut, B = {head: [], arms: [], body: []};
+      const n = (m.material && m.material.name) || byNode[m.name] || m.name, g = m.geometry, P = g.attributes.position, I = g.index.array, B = {};
+      const push = (k, a, b, c) => { (B[k] = B[k] || []).push(a, b, c); };
       for (let i = 0; i < I.length; i += 3) {
-        const a = I[i], b = I[i + 1], c = I[i + 2];
-        const cx = (P.getX(a) + P.getX(b) + P.getX(c)) / 3, cu = (P.getZ(a) + P.getZ(b) + P.getZ(c)) / 3;
-        (cu > C.head ? B.head : (Math.abs(cx) > C.arm && cu > C.armY ? B.arms : B.body)).push(a, b, c);
+        const a = I[i], b = I[i + 1], c = I[i + 2], cx = (P.getX(a) + P.getX(b) + P.getX(c)) / 3, cu = (P.getZ(a) + P.getZ(b) + P.getZ(c)) / 3;
+        if (n === 'face.png') push('head', a, b, c);
+        else if (n === 'hands.png' || n === 'palms.png') push('h' + (cx > 0 ? 'p' : 'n'), a, b, c);
+        else if (cu > C.head) push('head', a, b, c);
+        else if (Math.abs(cx) > C.arm && cu > C.armY) push('a' + (cx > 0 ? 'p' : 'n'), a, b, c);
+        else push(cu < AVATAR.legY ? 'legs' : 'body', a, b, c);
       }
       for (const k in B) {
-        if (!B[k].length) continue;
-        const ng = new THREE.BufferGeometry();
-        for (const at in g.attributes) ng.setAttribute(at, g.attributes[at]);
-        ng.setIndex(B[k]);
-        const nm = new THREE.Mesh(ng, m.material); nm.name = n + ':' + k; m.parent.add(nm); parts[k].push(nm);
+        if (k === 'legs') legSrc.push({g, idx: B[k], mat: m.material, par: m.parent});
+        else if (k[0] === 'a') armSrc[k[1]].push({g, idx: B[k], mat: m.material});
+        else if (k[0] === 'h' && k !== 'head') handSrc[k[1]].push({g, idx: B[k], mat: m.material});
+        else {
+          const ng = new THREE.BufferGeometry(); for (const at in g.attributes) ng.setAttribute(at, g.attributes[at]); ng.setIndex(B[k]);
+          const nm = new THREE.Mesh(ng, m.material); nm.name = n + ':' + k; m.parent.add(nm); parts[k].push(nm);
+        }
       }
       m.parent.remove(m);
     });
+    // main droite du joueur = main droite du modèle (côté x<0, le modèle regarde vers +z) et inversement
+    [-1, 1].forEach(sd => {
+      const key = sd > 0 ? 'n' : 'p', sx = -sd;
+      if (armSrc[key].length) { const a = this.armRig[sd] = makeArmRig(armSrc[key], sx); this.armsG.add(a.G); parts.arms.push(...a.meshes); }
+      const hel = this.hands[sd], hc = hel && hel.components['ninja-hand'];
+      if (handSrc[key].length && hc) { const h = makeHandRig(handSrc[key], sx); hc.mount(h); parts.hands.push(...h.meshes); }
+    });
+    if (legSrc.length) { this.legs = makeLegRig(legSrc); parts.legs.push(...this.legs.meshes); }
     this.root.add(model); this.applyShow();
+  },
+  animLegs(dt, head, fwd) {                                    // marche : vitesse du casque -> balancier des jambes
+    const L = this.legs; if (!L) return;
+    let v = 0, dir = 1;
+    if (this.lp) {
+      const dx = head.x - this.lp.x, dz = head.z - this.lp.z;
+      v = Math.min(Math.hypot(dx, dz) / (dt / 1000), 3.5); if (dx * fwd.x + dz * fwd.z < 0) dir = -1;
+    } else this.lp = new THREE.Vector3();
+    this.lp.copy(head);
+    this.spd += (v - this.spd) * (1 - Math.exp(-dt / 120));
+    const amp = clamp((this.spd - .15) / .9, 0, 1); this.amp += (amp - this.amp) * (1 - Math.exp(-dt / 100));
+    if (this.spd > .15) this.ph += dir * Math.PI * 2 * this.spd / 1.4 * dt / 1000;
+    const A = this.amp, p = this.ph;
+    [[L.tL, L.sL, p], [L.tR, L.sR, p + Math.PI]].forEach(([th, sh, q]) => {
+      th.rotation.x = -A * .55 * Math.sin(q);                  // cuisse : avant / arrière
+      sh.rotation.x = A * .9 * Math.max(0, Math.cos(q));       // genou : plie quand la jambe passe vers l'avant
+    });
   },
   applyShow() { for (const k in this.parts) this.parts[k].forEach(m => { m.visible = !!AVATAR.show[k]; }); },
   tick(t, dt) {
@@ -405,64 +459,88 @@ AFRAME.registerComponent('ninja-body', {
     this.yaw += df * (1 - Math.exp(-dt / (Math.abs(df) > .35 ? 120 : 1500)));
     const y = this.yaw, sn = Math.sin(y), cs = Math.cos(y);
     P.fwd.set(-sn, 0, -cs); P.right.set(cs, 0, -sn);
-    const floor = this.rig.getWorldPosition(P.f).y, H = Math.max(P.head.y - floor, 1);
-    const ka = clamp(H / 1.7, .8, 1.2), sc = clamp(H / AVATAR.modelEyeY, .55, 1.3);
+    const floor = this.rig.getWorldPosition(P.f).y, H = Math.max(P.head.y - floor, 1), sc = clamp(H / AVATAR.modelEyeY, .55, 1.3);
     const r = this.root;
     r.position.set(P.head.x - P.fwd.x * .05, floor, P.head.z - P.fwd.z * .05);
     r.rotation.y = y + Math.PI; r.scale.setScalar(sc); r.updateMatrixWorld(true);
+    P.q0.copy(r.quaternion);
+    this.animLegs(dt, P.head, P.fwd);
 
-    [-1, 1].forEach((sd, i) => {
-      const a = this.arm[i], hel = this.hands[sd], hc = hel && hel.components['ninja-hand'];
-      const show = !!(hc && hel.object3D.visible);
-      a.G.visible = show; if (!show) return;
-      hel.object3D.updateMatrixWorld(true);
-      hc.wrist.getWorldPosition(P.W);
-      P.S0.set(-sd * AVATAR.shoulderX, AVATAR.shoulderY, 0); r.localToWorld(P.S0);
-      P.D.subVectors(P.W, P.S0); let d = P.D.length(); if (d < 1e-4) return; P.D.divideScalar(d);
-      const l1 = a.L1 * ka, l2 = a.L2 * ka, Lm = (l1 + l2) * .985;
+    [-1, 1].forEach(sd => {
+      const a = this.armRig[sd], hel = this.hands[sd], hc = hel && hel.components['ninja-hand'];
+      if (!a || !hc) return;
+      const tracked = hel.object3D.visible; hc.root.visible = false; a.G.visible = false;
+      if (!tracked) return;
+      hel.object3D.updateMatrixWorld(true); hc.wrist.getWorldPosition(P.W);
+      P.S0.copy(a.J[0]); r.localToWorld(P.S0);
+      P.D.subVectors(P.W, P.S0); let d = P.D.length();
+      if (d > AVATAR.maxReach || d < 1e-4) return;            // pose pas encore valide : on ne montre rien (pas d'étirement)
+      P.D.divideScalar(d); hc.root.visible = true; a.G.visible = true;
+      const tot = AVATAR.reach * H, A1 = tot * a.L1 / (a.L1 + a.L2), A2 = tot - A1, Lm = (A1 + A2) * .985;
       P.S.copy(P.S0);
-      if (d > Lm) { const lean = Math.min(d - Lm, .2); P.S.addScaledVector(P.D, lean); d -= lean; }      // l'épaule suit la main
-      let str = 1; if (d > Lm) str = Math.min(d / Lm, 1.4);                                                // étirement limité
-      const A1 = l1 * str, A2 = l2 * str, dd = Math.max(Math.min(d, A1 + A2 - 1e-3), 1e-3);
-      const aa = (A1 * A1 - A2 * A2 + dd * dd) / (2 * dd), hh = Math.sqrt(Math.max(A1 * A1 - aa * aa, 0));
+      if (d > Lm) { const lean = Math.min(d - Lm, .04); P.S.addScaledVector(P.D, lean); d -= lean; }
+      const str = d > Lm ? Math.min(d / Lm, 1.25) : 1, a1 = A1 * str, a2 = A2 * str, dd = clamp(d, .001, a1 + a2 - .001);
+      const aa = (a1 * a1 - a2 * a2 + dd * dd) / (2 * dd), hh = Math.sqrt(Math.max(a1 * a1 - aa * aa, 0));
+      const pole = this.pole[sd];
       P.t1.set(0, -1, 0).addScaledVector(P.right, sd * .55).addScaledVector(P.fwd, -.35);
-      a.pole.lerp(P.t1, 1 - Math.exp(-dt / 80));
-      P.t2.copy(a.pole).addScaledVector(P.D, -a.pole.dot(P.D)); if (P.t2.lengthSq() < 1e-6) P.t2.set(0, -1, 0); P.t2.normalize();
+      pole.lerp(P.t1, 1 - Math.exp(-dt / 80));
+      P.t2.copy(pole).addScaledVector(P.D, -pole.dot(P.D)); if (P.t2.lengthSq() < 1e-6) P.t2.set(0, -1, 0); P.t2.normalize();
       P.E.copy(P.S).addScaledVector(P.D, aa).addScaledVector(P.t2, hh);
-      const [b0, b1, b2] = a.bones;
-      b0.position.copy(P.S); P.t1.subVectors(P.E, P.S).normalize(); b0.quaternion.setFromUnitVectors(P.up, P.t1); b0.scale.set(ka, ka * str, ka);
-      b1.position.copy(P.E); P.t1.subVectors(P.W, P.E).normalize(); b1.quaternion.setFromUnitVectors(P.up, P.t1); b1.scale.set(ka, ka * str, ka);
-      b2.position.copy(P.W); b2.quaternion.copy(b1.quaternion); b2.scale.set(ka, ka, ka);
+      const [b0, b1, b2] = a.bones, cr = sc * .9;
+      P.ax.set(a.sx, 0, 0).applyQuaternion(P.q0);
+      b0.position.copy(P.S); P.t1.subVectors(P.E, P.S).normalize(); b0.quaternion.setFromUnitVectors(P.ax, P.t1).multiply(P.q0); b0.scale.set(a1 / a.L1, cr, cr);
+      b1.position.copy(P.E); P.t1.subVectors(P.W, P.E).normalize(); b1.quaternion.setFromUnitVectors(P.ax, P.t1).multiply(P.q0); b1.scale.set(a2 / a.L2, cr, cr);
+      b2.position.copy(P.W); b2.quaternion.copy(b1.quaternion); b2.scale.copy(b1.scale);
     });
   }
 });
 
-/* API de customisation (console ou étapes suivantes) : Avatar.setSkin('#caa'), Avatar.setSleeve(...), Avatar.show('head', true)... */
+/* API de customisation : Avatar.tint('tex01.png','#2a3f78'), Avatar.show('head', true), Avatar.setTexture('tex01.png', url) */
 window.Avatar = {
-  config: AVATAR, mats: {skin: skinMat, sleeve: sleeveMat, cuff: cuffMat, nail: nailMat},
-  setSkin(c) { skinMat.color.set(c); }, setSleeve(c) { sleeveMat.color.set(c); }, setCuff(c) { cuffMat.color.set(c); },
-  show(part, v) { AVATAR.show[part] = v; const b = document.getElementById('body'); if (b && b.components['ninja-body']) b.components['ninja-body'].applyShow(); },
+  config: AVATAR,
+  all() { const b = document.getElementById('body').components['ninja-body']; return {b, list: [].concat(...Object.values(b.parts))}; },
+  show(part, v) { AVATAR.show[part] = v; this.all().b.applyShow(); },
+  tint(matName, c) { this.all().list.forEach(m => { if (m.material.name === matName) m.material.color.set(c); }); },
   setTexture(matName, url) {
-    const b = document.getElementById('body').components['ninja-body'], all = [].concat(...Object.values(b.parts));
     new THREE.TextureLoader().load(url, t => { t.colorSpace = THREE.SRGBColorSpace; t.flipY = false;
-      all.forEach(m => { if (m.material.name === matName) { m.material.map = t; m.material.needsUpdate = true; } }); });
+      this.all().list.forEach(m => { if (m.material.name === matName) { m.material.map = t; m.material.needsUpdate = true; } }); });
   }
 };
 
-/* Déplacement minimal au stick gauche (pour explorer en VR) */
-AFRAME.registerComponent('stick-move', {
+/* ============================ DÉPLACEMENT (PC + VR) : toujours relatif à la direction du regard ============================ */
+/* Avant = là où tu regardes (projeté à l'horizontale), droite = à ta droite. Clavier : ZQSD/WASD/flèches (touches physiques, AZERTY ou QWERTY), Maj = courir. VR : stick gauche. */
+const MOVE = {pcSpeed: 4, pcRun: 8, vrSpeed: 3, deadzone: .15, invertStickY: false, invertStickX: false};
+AFRAME.registerComponent('locomotion', {
   init() {
-    this.a = [0, 0]; this.q = new THREE.Quaternion(); this.e = new THREE.Euler();
-    this.el.addEventListener('thumbstickmoved', e => { this.a = [e.detail.x, e.detail.y]; });
-    this.rig = document.getElementById('rig').object3D;
+    this.keys = {}; this.stick = [0, 0]; this.pc = false;
+    this.f = new THREE.Vector3(0, 0, -1); this.r = new THREE.Vector3(1, 0, 0);
+    const clear = () => { this.keys = {}; };
+    window.addEventListener('keydown', e => { this.keys[e.code] = true; });
+    window.addEventListener('keyup', e => { this.keys[e.code] = false; });
+    window.addEventListener('blur', clear); document.addEventListener('pointerlockchange', clear);
+    const lh = document.getElementById('lhand');
+    lh.addEventListener('thumbstickmoved', e => { this.stick = [e.detail.x, e.detail.y]; });
+    lh.addEventListener('controllerdisconnected', () => { this.stick = [0, 0]; });
   },
   tick(t, dt) {
-    const [x, y] = this.a; if (Math.abs(x) < .15 && Math.abs(y) < .15) return;
+    dt = Math.min(dt || 16, 50) / 1000;
+    const k = this.keys; let x = 0, y = 0, run = false;                        // x : droite (+), y : avant (+)
+    if (this.pc) {
+      if (k.KeyW || k.ArrowUp) y += 1; if (k.KeyS || k.ArrowDown) y -= 1;
+      if (k.KeyD || k.ArrowRight) x += 1; if (k.KeyA || k.ArrowLeft) x -= 1;
+      run = !!(k.ShiftLeft || k.ShiftRight);
+    }
+    const sx = this.stick[0], sy = this.stick[1];
+    if (Math.hypot(sx, sy) > MOVE.deadzone) { x += (MOVE.invertStickX ? -sx : sx); y += (MOVE.invertStickY ? sy : -sy); }   // stick poussé vers l'avant = y négatif
+    if (!x && !y) return;
+    const n = Math.hypot(x, y); if (n > 1) { x /= n; y /= n; }
     const cam = this.el.sceneEl.camera; if (!cam) return;
-    cam.getWorldQuaternion(this.q); this.e.setFromQuaternion(this.q, 'YXZ');
-    const yaw = this.e.y, v = 3 * dt / 1000;
-    this.rig.position.x += (Math.cos(yaw) * x + Math.sin(yaw) * y) * v;
-    this.rig.position.z += (-Math.sin(yaw) * x + Math.cos(yaw) * y) * v;
+    cam.getWorldDirection(this.f); this.f.y = 0;
+    if (this.f.lengthSq() < 1e-4) this.f.copy(this.lastF || this.f.set(0, 0, -1)); else { this.f.normalize(); this.lastF = this.lastF || new THREE.Vector3(); this.lastF.copy(this.f); }
+    this.r.set(-this.f.z, 0, this.f.x);                                        // droite = avant tourné de 90°
+    const vr = this.el.sceneEl.is('vr-mode'), v = (vr ? MOVE.vrSpeed : (run ? MOVE.pcRun : MOVE.pcSpeed)) * dt;
+    const p = this.el.object3D.position;
+    p.x += (this.f.x * y + this.r.x * x) * v; p.z += (this.f.z * y + this.r.z * x) * v;
   }
 });
 
@@ -476,7 +554,7 @@ scene.hasLoaded ? ready() : scene.addEventListener('loaded', ready);
 
 btnPC.addEventListener('click', () => {
   menu.classList.add('hidden'); hud.style.display = 'block';
-  rig.setAttribute('wasd-controls', 'enabled', true);
+  rig.components.locomotion.pc = true;
   cam.setAttribute('look-controls', 'enabled', true);
   if (scene.canvas && scene.canvas.requestPointerLock) scene.canvas.requestPointerLock();
 });
