@@ -42,7 +42,7 @@
   </div>
   <div class="kanji" aria-hidden="true">木ノ葉</div>
 </div>
-<div id="hud">ZQSD / WASD / flèches : marcher (Maj : courir) · Souris : regarder · Tab/C (maintenir) : roue d'armes · 1-4 : raccourcis · Clic : lancer · L : verrouiller/libérer la souris</div>
+<div id="hud">ZQSD / WASD / flèches : marcher (Maj : courir) · Souris : orbiter la caméra · Molette : zoom · Tab/C (maintenir) : roue d'armes · 1-4 : raccourcis · Clic : lancer · L : verrouiller/libérer la souris</div>
 
 <a-scene id="scene" vr-mode-ui="enabled:false" loading-screen="enabled:false" device-orientation-permission-ui="enabled:false"
          background="color:#9fd0ec" fog="type:linear;color:#cfe3ee;near:60;far:260" renderer="antialias:true">
@@ -53,7 +53,7 @@
 
   <a-entity konoha></a-entity>
 
-  <a-entity id="rig" position="0 0 64" locomotion>
+  <a-entity id="rig" position="0 0 64" locomotion thirdperson>
     <a-entity id="cam" camera="near:.05;far:600" position="0 1.65 0" look-controls="pointerLockEnabled:true;enabled:false"></a-entity>
     <!-- Les manettes DOIVENT être enfants du rig : sinon leur pose reste ancrée à l'origine du monde (bras étirés à l'autre bout de la map) -->
     <a-entity id="lhand" oculus-touch-controls="hand:left;model:false" ninja-hand="side:left"></a-entity>
@@ -224,7 +224,7 @@ AFRAME.registerComponent('konoha', {
 /* Corps, bras ET mains viennent du modèle naruto.glb (embarqué en base64). Tout est personnalisable via AVATAR / window.Avatar. */
 const AVATAR = {
   show: {head: false, arms: true, hands: true, body: true, legs: true},
-  cut: {head: 1.62, arm: .29, armY: 1.4},   // découpe du GLB (coordonnées d'origine : x, y, z = haut)
+  cut: {head: 1.62, arm: .29, armY: 1.4, armTop: 1.72},   // découpe du GLB (coordonnées d'origine : x, y, z = haut)
   modelEyeY: 1.84,                          // hauteur des yeux dans le modèle
   reach: .34,                               // longueur épaule→poignet = reach × taille du joueur
   handScale: .70,                           // échelle des mains du modèle sur les manettes
@@ -250,6 +250,7 @@ function eachV(geos, fn) { geos.forEach(g => { const P = g.attributes.position; 
 /* ---------- Mains : mesh du GLB skinné (os par doigt, repères mesurés sur le modèle) ---------- */
 const TIP = [1.031, 1.034, 1.019, .992, .936];                       // |x| du bout de chaque doigt (index, majeur, annulaire, auriculaire, pouce)
 const baseOf = d => d === 4 ? .85 : .868;
+const THUMB_K = .68;                                                  // le pouce d'origine est trop gros : réduit autour de sa base (1 = taille du modèle)
 function digit(ax, y, z) {
   if (ax < .845) return -1;
   if (z > 0 && y < 1.6) return 4;
@@ -272,12 +273,19 @@ function makeHandRig(src, sx) {
   });
   const root = new THREE.Bone(), bones = [root], f = [];
   for (let d = 0; d < 5; d++) {
-    const base = baseOf(d), seg = (TIP[d] - base) / 3, c = cen[d], b0 = new THREE.Bone(), b1 = new THREE.Bone(), b2 = new THREE.Bone();
+    const base = baseOf(d), seg = (TIP[d] - base) / 3 * (d === 4 ? THUMB_K : 1), c = cen[d], b0 = new THREE.Bone(), b1 = new THREE.Bone(), b2 = new THREE.Bone();
     b0.position.set(sx * base, c.c ? c.y / c.c : 1.6, c.c ? c.z / c.c : -.05); b1.position.set(sx * seg, 0, 0); b2.position.set(sx * seg, 0, 0);
     root.add(b0); b0.add(b1); b1.add(b2); bones.push(b0, b1, b2); f.push([b0, b1, b2]);
   }
+  const c4 = cen[4], p0 = new THREE.Vector3(sx * baseOf(4), c4.c ? c4.y / c4.c : 1.56, c4.c ? c4.z / c4.c : .02);
   const G = new THREE.Group(), meshes = geos.map((g, i) => {
-    addSkin(g, handW); const m = new THREE.SkinnedMesh(g, src[i].mat); m.frustumCulled = false; G.add(m); return m;
+    addSkin(g, handW);
+    const P = g.attributes.position;                              // pouce : réduit autour de sa base (poids calculés avant, fondu progressif pour rester collé à la paume)
+    for (let v = 0; v < P.count; v++) {
+      const x = P.getX(v), y = P.getY(v), z = P.getZ(v), ax = Math.abs(x); if (digit(ax, y, z) !== 4) continue;
+      const k = 1 - (1 - THUMB_K) * sstep(.845, .885, ax); P.setXYZ(v, p0.x + (x - p0.x) * k, p0.y + (y - p0.y) * k, p0.z + (z - p0.z) * k);
+    }
+    P.needsUpdate = true; const m = new THREE.SkinnedMesh(g, src[i].mat); m.frustumCulled = false; G.add(m); return m;
   });
   meshes[0].add(root); G.updateMatrixWorld(true);
   const sk = new THREE.Skeleton(bones); meshes.forEach(m => m.bind(sk));
@@ -378,6 +386,7 @@ AFRAME.registerComponent('ninja-body', {
     this.hands = {'-1': document.getElementById('lhand'), '1': document.getElementById('rhand')};
     this.rig = document.getElementById('rig').object3D;
     this.pole = {'-1': new V(0, -1, 0), '1': new V(0, -1, 0)};
+    this.tq = new THREE.Quaternion(); this.tm = new THREE.Matrix4(); this.tUp = new V(0, 1, 0); this.tz = new V(); this.tp = false;
     const sc = this.el.sceneEl;
     sc.addEventListener('enter-vr', () => { this.vr = true; this.root.visible = true; this.armsG.visible = true; });
     sc.addEventListener('exit-vr', () => { this.vr = false; this.root.visible = false; this.armsG.visible = false; });
@@ -407,8 +416,8 @@ AFRAME.registerComponent('ninja-body', {
         const a = I[i], b = I[i + 1], c = I[i + 2], cx = (P.getX(a) + P.getX(b) + P.getX(c)) / 3, cu = (P.getZ(a) + P.getZ(b) + P.getZ(c)) / 3;
         if (n === 'face.png') push('head', a, b, c);
         else if (n === 'hands.png' || n === 'palms.png') push('h' + (cx > 0 ? 'p' : 'n'), a, b, c);
+        else if (Math.abs(cx) > C.arm && cu > C.armY && cu < C.armTop) push('a' + (cx > 0 ? 'p' : 'n'), a, b, c);   // manches (y compris leur dessus, sinon il apparaît avec la tête)
         else if (cu > C.head) push('head', a, b, c);
-        else if (Math.abs(cx) > C.arm && cu > C.armY) push('a' + (cx > 0 ? 'p' : 'n'), a, b, c);
         else push(cu < AVATAR.legY ? 'legs' : 'body', a, b, c);
       }
       for (const k in B) {
@@ -442,7 +451,7 @@ AFRAME.registerComponent('ninja-body', {
     this.lp.copy(head);
     this.spd += (v - this.spd) * (1 - Math.exp(-dt / 120));
     const amp = clamp((this.spd - .15) / .9, 0, 1); this.amp += (amp - this.amp) * (1 - Math.exp(-dt / 100));
-    if (this.spd > .15) this.ph += dir * Math.PI * 2 * this.spd / 1.4 * dt / 1000;
+    if (this.spd > .15) this.ph += dir * Math.PI * 2 * Math.min(this.spd, 3) / 1.4 * dt / 1000;
     const A = this.amp, p = this.ph;
     [[L.tL, L.sL, p], [L.tR, L.sR, p + Math.PI]].forEach(([th, sh, q]) => {
       th.rotation.x = -A * .55 * Math.sin(q);                  // cuisse : avant / arrière
@@ -450,14 +459,33 @@ AFRAME.registerComponent('ninja-body', {
     });
   },
   applyShow() { for (const k in this.parts) this.parts[k].forEach(m => { m.visible = !!AVATAR.show[k]; }); },
+  tpHand(sd, a, hel, hc, H) {                                   // PC 3e personne : mains "virtuelles" (bras qui se balancent / bras tendu vers la visée)
+    const P = this.P, r = this.root, armed = sd > 0 && TP.aimDir;
+    P.S0.copy(a.J[0]); r.localToWorld(P.S0);
+    const sw = this.amp * Math.sin(this.ph + (sd > 0 ? 0 : Math.PI)) * .2;
+    if (armed) { P.D.copy(TP.aimDir); P.W.copy(P.S0).addScaledVector(P.D, AVATAR.reach * H * .88); }
+    else { P.W.copy(P.S0).addScaledVector(this.tUp, -AVATAR.reach * H * .88).addScaledVector(P.fwd, sw + .03).addScaledVector(P.right, sd * .06); P.D.set(0, -1, 0).addScaledVector(P.fwd, .15 + sw * 1.2).normalize(); }
+    this.tm.lookAt(this.tz.set(0, 0, 0), P.t2.copy(P.D).negate(), this.tUp); this.tq.setFromRotationMatrix(this.tm);   // doigts (-Z de la manette) dans la direction P.D
+    hel.object3D.quaternion.copy(this.tq); P.t1.set(0, 0, .05).applyQuaternion(this.tq);
+    hel.object3D.position.copy(P.W).sub(P.t1).sub(P.f); hel.object3D.visible = true; hc.tt = 0; hc.gg = armed ? .15 : .3;
+  },
   tick(t, dt) {
-    if (!this.vr) return;
+    const tp = TP.on && !this.el.sceneEl.is('vr-mode');
+    if (tp !== this.tp) { this.tp = tp; AVATAR.show.head = tp; this.applyShow(); }
+    this.root.visible = this.armsG.visible = tp || this.vr;
+    if (!this.vr && !tp) return;
     const cam = this.el.sceneEl.camera; if (!cam) return;
     dt = Math.min(dt || 16, 60);
     const P = this.P;
-    cam.getWorldPosition(P.head); cam.getWorldQuaternion(P.q); P.e.setFromQuaternion(P.q, 'YXZ');
-    let df = P.e.y - this.yaw; df = Math.atan2(Math.sin(df), Math.cos(df));
-    this.yaw += df * (1 - Math.exp(-dt / (Math.abs(df) > .35 ? 120 : 1500)));
+    if (tp) {                                                      // la "tête" suit le joueur (rig) ; le corps regarde la visée ou la direction de marche
+      this.rig.getWorldPosition(P.f); P.head.set(P.f.x, P.f.y + 1.72, P.f.z);
+      const want = TP.aimDir ? Math.atan2(-TP.aimDir.x, -TP.aimDir.z) : (TP.moving ? TP.moveYaw : this.yaw);
+      let df = want - this.yaw; df = Math.atan2(Math.sin(df), Math.cos(df)); this.yaw += df * (1 - Math.exp(-dt / 70));
+    } else {
+      cam.getWorldPosition(P.head); cam.getWorldQuaternion(P.q); P.e.setFromQuaternion(P.q, 'YXZ');
+      let df = P.e.y - this.yaw; df = Math.atan2(Math.sin(df), Math.cos(df));
+      this.yaw += df * (1 - Math.exp(-dt / (Math.abs(df) > .35 ? 120 : 1500)));
+    }
     const y = this.yaw, sn = Math.sin(y), cs = Math.cos(y);
     P.fwd.set(-sn, 0, -cs); P.right.set(cs, 0, -sn);
     const floor = this.rig.getWorldPosition(P.f).y, H = Math.max(P.head.y - floor, 1), sc = clamp(H / AVATAR.modelEyeY, .55, 1.3);
@@ -470,6 +498,7 @@ AFRAME.registerComponent('ninja-body', {
     [-1, 1].forEach(sd => {
       const a = this.armRig[sd], hel = this.hands[sd], hc = hel && hel.components['ninja-hand'];
       if (!a || !hc) return;
+      if (tp) this.tpHand(sd, a, hel, hc, H);
       const tracked = hel.object3D.visible; hc.root.visible = false; a.G.visible = false;
       if (!tracked) return;
       hel.object3D.updateMatrixWorld(true); hc.wrist.getWorldPosition(P.W);
@@ -508,6 +537,9 @@ window.Avatar = {
   }
 };
 
+/* ============================ VUE 3e PERSONNE (PC) : caméra orbitale au-dessus / derrière le personnage ============================ */
+const TP = {on: false, yaw: 0, pitch: .8, dist: 5, faceYaw: 0, moving: false, moveYaw: 0, aimDir: null, minP: .25, maxP: 1.35, minD: 2.5, maxD: 11, sens: .0025};
+window.TP = TP;                                   // réglages de la caméra : TP.dist, TP.pitch, TP.sens, TP.minD/maxD...
 /* ============================ DÉPLACEMENT (PC + VR) : toujours relatif à la direction du regard ============================ */
 /* Avant = là où tu regardes (projeté à l'horizontale), droite = à ta droite. Clavier : ZQSD/WASD/flèches (touches physiques, AZERTY ou QWERTY), Maj = courir. VR : stick gauche. */
 const MOVE = {pcSpeed: 4, pcRun: 8, vrSpeed: 3, deadzone: .15, invertStickY: false, invertStickX: false};
@@ -524,7 +556,7 @@ AFRAME.registerComponent('locomotion', {
     lh.addEventListener('controllerdisconnected', () => { this.stick = [0, 0]; });
   },
   tick(t, dt) {
-    dt = Math.min(dt || 16, 50) / 1000;
+    dt = Math.min(dt || 16, 50) / 1000; TP.moving = false;
     if (Radial.open) return;                                                   // roue d'armes ouverte : pas de déplacement
     const k = this.keys; let x = 0, y = 0, run = false;                        // x : droite (+), y : avant (+)
     if (this.pc) {
@@ -542,7 +574,38 @@ AFRAME.registerComponent('locomotion', {
     this.r.set(-this.f.z, 0, this.f.x);                                        // droite = avant tourné de 90°
     const vr = this.el.sceneEl.is('vr-mode'), v = (vr ? MOVE.vrSpeed : (run ? MOVE.pcRun : MOVE.pcSpeed)) * dt;
     const p = this.el.object3D.position;
-    p.x += (this.f.x * y + this.r.x * x) * v; p.z += (this.f.z * y + this.r.z * x) * v;
+    const mx = this.f.x * y + this.r.x * x, mz = this.f.z * y + this.r.z * x;
+    p.x += mx * v; p.z += mz * v; TP.moving = true; TP.moveYaw = Math.atan2(-mx, -mz);
+  }
+});
+
+AFRAME.registerComponent('thirdperson', {
+  init() {
+    this.camEl = document.getElementById('cam'); this.cd = TP.dist; this.t = new THREE.Vector3(); this.b = new THREE.Vector3(); this.c = new THREE.Vector3(); this.rc = new THREE.Raycaster();
+    window.addEventListener('mousemove', e => {
+      if (!TP.on || Radial.open || this.el.sceneEl.is('vr-mode')) return;
+      if (document.pointerLockElement || (e.buttons & 2)) { TP.yaw -= e.movementX * TP.sens; TP.pitch = clamp(TP.pitch + e.movementY * TP.sens, TP.minP, TP.maxP); }
+    });
+    window.addEventListener('wheel', e => { if (TP.on) TP.dist = clamp(TP.dist + Math.sign(e.deltaY) * .6, TP.minD, TP.maxD); }, {passive: true});
+    window.addEventListener('contextmenu', e => { if (TP.on) e.preventDefault(); });
+  },
+  tick(t, dtms) {
+    if (!TP.on || this.el.sceneEl.is('vr-mode')) return;
+    const dt = Math.min(dtms || 16, 50) / 1000, cy = Math.cos(TP.yaw), sy = Math.sin(TP.yaw), cp = Math.cos(TP.pitch), sp = Math.sin(TP.pitch);
+    const tg = this.t.set(0, 1.5, 0).add(this.c.set(cy * .3, 0, -sy * .3)), back = this.b.set(sy * cp, sp, cy * cp), rp = this.el.object3D.position;
+    // la caméra ne traverse pas les bâtiments : on raccourcit la distance si un mur est derrière le personnage
+    let want = TP.dist; const cb = document.getElementById('combat').components.combat;
+    if (cb) {
+      if (!cb.solids) cb.solids = cb.collect();
+      const ox = rp.x + tg.x, oy = rp.y + tg.y, oz = rp.z + tg.z; this.rc.set(new THREE.Vector3(ox, oy, oz), back); this.rc.far = want + .4;
+      for (const s of cb.solids) {
+        const px = s.c.x - ox, py = s.c.y - oy, pz = s.c.z - oz, tt = clamp(px * back.x + py * back.y + pz * back.z, 0, want + .4), dx = ox + back.x * tt - s.c.x, dy = oy + back.y * tt - s.c.y, dz = oz + back.z * tt - s.c.z;
+        if (dx * dx + dy * dy + dz * dz > (s.r + .1) * (s.r + .1)) continue;
+        const h = this.rc.intersectObject(s.m, false)[0]; if (h) want = Math.min(want, Math.max(TP.minD * .6, h.distance - .35));
+      }
+    }
+    this.cd = want < this.cd ? want : this.cd + (want - this.cd) * (1 - Math.exp(-dt / .15));
+    const o = this.camEl.object3D; o.position.copy(tg).addScaledVector(back, this.cd); o.rotation.set(-TP.pitch, TP.yaw, 0, 'YXZ');
   }
 });
 
@@ -765,9 +828,22 @@ AFRAME.registerComponent('combat', {
     v.e.copy(v.c).addScaledVector(a.dir, dist);                  // point visé
     cam.getWorldQuaternion(v.q); o.set(.22, -.17, -.5).applyQuaternion(v.q).add(v.c); d.copy(v.e).sub(o).normalize(); return a.target;
   },
+  tpPoint(o) {                                                   // point visé : rayon caméra (centre / curseur) -> mannequin touché, sinon plan à hauteur de la main
+    const cam = this.sc.camera, k = this.k || (this.k = {c: new THREE.Vector3(), d: new THREE.Vector3(), e: new THREE.Vector3(), f: new THREE.Vector3(), g: new THREE.Vector3(), p: new THREE.Vector3()}), locked = !!document.pointerLockElement;
+    const nx = locked ? 0 : this.mouse.x / innerWidth * 2 - 1, ny = locked ? 0 : -(this.mouse.y / innerHeight * 2 - 1);
+    cam.getWorldPosition(k.c); k.d.set(nx, ny, .5).unproject(cam).sub(k.c).normalize();
+    let best = 1e9, found = false;
+    for (const t of this.targets) for (const s of t.spheres) {
+      k.e.set(s[0], s[1], s[2]).add(t.g.position); k.f.copy(k.e).sub(k.c); const tt = k.f.dot(k.d); if (tt < 0 || tt >= best) continue;
+      if (k.g.copy(k.c).addScaledVector(k.d, tt).distanceTo(k.e) <= s[3] + .18) { best = tt; k.p.copy(k.e); found = true; }
+    }
+    if (found) return k.p;
+    const dy = k.d.y; return k.p.copy(k.c).addScaledVector(k.d, clamp(dy < -1e-3 ? (o.y - k.c.y) / dy : 60, 1, 70));
+  },
+  tpShot(o, speed) { const d = this.o2; this.vrAim(o, this.o1); d.copy(this.tpPoint(o)).sub(o).normalize(); return this.assist(o, d, speed); },
   fire() {
     const v = this.v, o = new THREE.Vector3(), d = new THREE.Vector3(), cfg = COMBAT[this.cur]; let dir;
-    if (this.vr) { this.vrAim(o, d); dir = this.assist(o, d, cfg.speed).dir; pulse(this.rh, .45, 28); } else { this.pcAim(o, d); dir = d; }
+    if (this.vr) { this.vrAim(o, d); dir = this.assist(o, d, cfg.speed).dir; pulse(this.rh, .45, 28); } else { dir = this.tpShot(o, cfg.speed).dir; }
     this.spawn(this.cur, o, dir, cfg); this.cd = cfg.cooldown; this.fireT = 0; sfx('throw');
   },
   spawn(type, o, dir, cfg) {
@@ -807,21 +883,24 @@ AFRAME.registerComponent('combat', {
       } else { this.dWheel.style.display = 'block'; }
     }
     // armes tenues
-    const rhOn = vr && this.rh.object3D.visible && !Radial.open;
+    const rhOn = (vr || pc) && this.rh.object3D.visible && !Radial.open;
     for (const k in this.held) { const h = this.held[k]; h.visible = rhOn && this.cur === k; if (h.visible) { const pop = Math.min(1, this.fireT / .15); h.scale.setScalar(.6 + .4 * pop); if (h.userData.spin) h.userData.spin.rotation.z += dt * 2.5; } }
-    for (const k in this.vm) { const h = this.vm[k]; h.visible = pc && !Radial.open && this.cur === k; if (h.visible) { const rec = Math.max(0, 1 - this.fireT / .16); h.position.set(.22, -.18 + Math.sin(t / 700) * .004, -.45 + rec * .07); if (h.userData.spin) h.userData.spin.rotation.z += dt * (this.fireT < .3 ? 14 : 2); } }
+    for (const k in this.vm) { const h = this.vm[k]; h.visible = false; if (h.visible) { const rec = Math.max(0, 1 - this.fireT / .16); h.position.set(.22, -.18 + Math.sin(t / 700) * .004, -.45 + rec * .07); if (h.userData.spin) h.userData.spin.rotation.z += dt * (this.fireT < .3 ? 14 : 2); } }
     // tir (maintien = tir en rafale nerveux)
     if (!Radial.open && armed && this.cd <= 0) {
       if (vr && this.rh.object3D.visible && this.rh.components['ninja-hand'].tt > .75) this.fire(); else if (pc && this.mouse.down) this.fire();
     }
     // aide visuelle de visée
     let lock = null; this.aimLine.visible = this.reticle.visible = false;
-    if (vr && armed && !Radial.open && this.rh.object3D.visible) {
-      const o = this.o1, d = this.o2; this.vrAim(o, d); const a = this.assist(o, d, COMBAT[this.cur].speed); lock = a.target; let len = 14;
+    TP.aimDir = null;
+    if ((vr || pc) && armed && !Radial.open && this.rh.object3D.visible) {
+      const o = this.o1, d = this.o2; let a; this.vrAim(o, d);
+      if (vr) a = this.assist(o, d, COMBAT[this.cur].speed); else { d.copy(this.tpPoint(o)).sub(o).normalize(); a = this.assist(o, d, COMBAT[this.cur].speed); TP.aimDir = TP.aimDir || new THREE.Vector3(); TP.aimDir.copy(a.dir); }
+      lock = a.target; let len = 14;
       if (a.target) { a.target.center(v.c); len = Math.max(1, v.c.distanceTo(o)); }
       this.aimLine.position.copy(o); this.aimLine.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, -1), a.dir); this.aimLine.scale.set(1, 1, len); this.aimLine.material.color.setHex(lock ? 0xf0861f : 0xffffff); this.aimLine.material.opacity = lock ? .75 : .35; this.aimLine.visible = true;
       this.reticle.position.copy(o).addScaledVector(a.dir, len); sc.camera.getWorldPosition(v.c); this.reticle.lookAt(v.c); this.reticle.scale.setScalar(.012 * len + .01); this.reticle.material.color.setHex(lock ? 0xf0861f : 0xffffff); this.reticle.visible = true;
-    } else if (pc && armed && document.pointerLockElement) { sc.camera.getWorldPosition(v.c); sc.camera.getWorldDirection(v.d); lock = this.assist(v.c, v.d, COMBAT[this.cur].speed).target; }
+    }
     this.dX.classList.toggle('lock', !!lock);
     this.updateProjectiles(dt); this.updateFx(dt, t);
     if (this.toastT > 0) { this.toastT -= dt; this.toast3d.visible = vr && this.toastT > 0; this.toast3d.material.opacity = Math.min(1, this.toastT / .4); }
@@ -866,7 +945,7 @@ scene.hasLoaded ? ready() : scene.addEventListener('loaded', ready);
 btnPC.addEventListener('click', () => {
   menu.classList.add('hidden'); hud.style.display = 'block';
   rig.components.locomotion.pc = true;
-  cam.setAttribute('look-controls', 'enabled', true);
+  TP.on = true;                                   // PC : vue 3e personne (la souris orbite la caméra)
   if (scene.canvas && scene.canvas.requestPointerLock) scene.canvas.requestPointerLock();
 });
 
